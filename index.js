@@ -41,6 +41,29 @@ REGRAS:
 // Armazena histórico de conversa por usuário
 const conversationHistory = {};
 
+// ✅ Função reutilizável para enviar mensagem no WhatsApp
+async function sendWhatsAppMessage(phoneNumberId, to, text) {
+  const response = await fetch(
+    `https://graph.facebook.com/v22.0/${phoneNumberId}/messages`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to,
+        type: 'text',
+        text: { body: text }
+      })
+    }
+  );
+  const data = await response.json();
+  console.log('Mensagem enviada:', data.messages?.[0]?.id ? '✅ OK' : '❌ Erro', JSON.stringify(data));
+  return data;
+}
+
 // Verificação do Webhook pela Meta
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -115,10 +138,37 @@ app.post('/webhook', async (req, res) => {
     );
 
     const geminiData = await geminiResponse.json();
+
+    // ✅ Tratamento de erro de cota (429) e outros erros do Gemini
+    if (geminiData.error) {
+      const errorCode = geminiData.error.code;
+      console.error('Erro Gemini:', JSON.stringify(geminiData.error));
+
+      if (errorCode === 429) {
+        await sendWhatsAppMessage(
+          phoneNumberId,
+          userPhone,
+          '⏳ Estou com muitas conversas agora! Por favor, tente novamente em alguns minutos. 😊'
+        );
+      } else {
+        await sendWhatsAppMessage(
+          phoneNumberId,
+          userPhone,
+          '😕 Ocorreu um erro interno. Tente novamente em instantes!'
+        );
+      }
+      return res.sendStatus(200);
+    }
+
     const botReply = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
 
     if (!botReply) {
-      console.error('Erro Gemini:', JSON.stringify(geminiData));
+      console.error('Resposta vazia do Gemini:', JSON.stringify(geminiData));
+      await sendWhatsAppMessage(
+        phoneNumberId,
+        userPhone,
+        '😕 Não consegui processar sua mensagem. Pode repetir?'
+      );
       return res.sendStatus(200);
     }
 
@@ -129,25 +179,7 @@ app.post('/webhook', async (req, res) => {
     });
 
     // Envia resposta para o WhatsApp
-    const whatsappResponse = await fetch(
-      `https://graph.facebook.com/v22.0/${phoneNumberId}/messages`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`
-        },
-        body: JSON.stringify({
-          messaging_product: 'whatsapp',
-          to: userPhone,
-          type: 'text',
-          text: { body: botReply }
-        })
-      }
-    );
-
-    const waData = await whatsappResponse.json();
-    console.log('Resposta enviada:', waData.messages?.[0]?.id ? '✅ OK' : '❌ Erro');
+    await sendWhatsAppMessage(phoneNumberId, userPhone, botReply);
 
     res.sendStatus(200);
   } catch (error) {
