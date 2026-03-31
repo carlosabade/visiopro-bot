@@ -2,6 +2,12 @@ const express = require('express');
 const app = express();
 app.use(express.json());
 
+const { createClient } = require('@supabase/supabase-js');
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
+
 const VERIFY_TOKEN = 'visioprobot2025';
 
 const VIVI_PROMPT = `Você é a Vivi, assistente virtual da VisioPro Marketing — agência especializada em conteúdo com IA, vídeos gerados por inteligência artificial, influenciadores digitais e campanhas para negócios brasileiros.
@@ -38,10 +44,8 @@ REGRAS:
 - Sempre em português brasileiro
 - Não revele que é bot a menos que perguntado diretamente`;
 
-// Armazena histórico de conversa por usuário
 const conversationHistory = {};
 
-// ✅ Função reutilizável para enviar mensagem no WhatsApp
 async function sendWhatsAppMessage(phoneNumberId, to, text) {
   const response = await fetch(
     `https://graph.facebook.com/v22.0/${phoneNumberId}/messages`,
@@ -64,7 +68,6 @@ async function sendWhatsAppMessage(phoneNumberId, to, text) {
   return data;
 }
 
-// Verificação do Webhook pela Meta
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -78,7 +81,6 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-// Recebe mensagens do WhatsApp
 app.post('/webhook', async (req, res) => {
   try {
     const body = req.body;
@@ -102,23 +104,25 @@ app.post('/webhook', async (req, res) => {
 
     console.log(`Mensagem recebida de ${userPhone}: ${userText}`);
 
-    // Inicializa histórico se não existir
+    // ✅ Salva lead no Supabase
+    await supabase.from('vivi_leads').upsert(
+      { whatsapp: userPhone, status: 'em_conversa' },
+      { onConflict: 'whatsapp' }
+    );
+
     if (!conversationHistory[userPhone]) {
       conversationHistory[userPhone] = [];
     }
 
-    // Adiciona mensagem do usuário ao histórico
     conversationHistory[userPhone].push({
       role: 'user',
       parts: [{ text: userText }]
     });
 
-    // Limita histórico a 20 mensagens para não estourar contexto
     if (conversationHistory[userPhone].length > 20) {
       conversationHistory[userPhone] = conversationHistory[userPhone].slice(-20);
     }
 
-    // Chama o Gemini
     const geminiResponse = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
@@ -139,23 +143,14 @@ app.post('/webhook', async (req, res) => {
 
     const geminiData = await geminiResponse.json();
 
-    // ✅ Tratamento de erro de cota (429) e outros erros do Gemini
     if (geminiData.error) {
       const errorCode = geminiData.error.code;
       console.error('Erro Gemini:', JSON.stringify(geminiData.error));
 
       if (errorCode === 429) {
-        await sendWhatsAppMessage(
-          phoneNumberId,
-          userPhone,
-          '⏳ Estou com muitas conversas agora! Por favor, tente novamente em alguns minutos. 😊'
-        );
+        await sendWhatsAppMessage(phoneNumberId, userPhone, '⏳ Estou com muitas conversas agora! Por favor, tente novamente em alguns minutos. 😊');
       } else {
-        await sendWhatsAppMessage(
-          phoneNumberId,
-          userPhone,
-          '😕 Ocorreu um erro interno. Tente novamente em instantes!'
-        );
+        await sendWhatsAppMessage(phoneNumberId, userPhone, '😕 Ocorreu um erro interno. Tente novamente em instantes!');
       }
       return res.sendStatus(200);
     }
@@ -164,21 +159,15 @@ app.post('/webhook', async (req, res) => {
 
     if (!botReply) {
       console.error('Resposta vazia do Gemini:', JSON.stringify(geminiData));
-      await sendWhatsAppMessage(
-        phoneNumberId,
-        userPhone,
-        '😕 Não consegui processar sua mensagem. Pode repetir?'
-      );
+      await sendWhatsAppMessage(phoneNumberId, userPhone, '😕 Não consegui processar sua mensagem. Pode repetir?');
       return res.sendStatus(200);
     }
 
-    // Adiciona resposta da Vivi ao histórico
     conversationHistory[userPhone].push({
       role: 'model',
       parts: [{ text: botReply }]
     });
 
-    // Envia resposta para o WhatsApp
     await sendWhatsAppMessage(phoneNumberId, userPhone, botReply);
 
     res.sendStatus(200);
